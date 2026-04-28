@@ -1,7 +1,7 @@
 # Sub-Agents — 固定层 + 全品类动态层
 
 > 所有 Sub-Agent 执行铁律：**接到 Ticket 后，第一步必须制定搜索策略，严禁直接生成内容。**
-> 完整执行规范见 [protocol.md](protocol.md) SSP v1.0 协议。
+> 完整执行规范见 [protocol.md](protocol.md) SSP v1.1 协议（含 AIGC 资产执行协议 + 代码编写执行协议）。
 
 ---
 
@@ -591,19 +591,31 @@ winProbability = playerScore² / (playerScore² + enemyScore²)
 
 ## 固定层 C — 美术总监 Agent（Art Director Agent）
 
-**职责**：视觉风格定义 / 资源规格清单 / 外包/AI 生成规格 / 美术管线设计
+**职责**：视觉风格定义 / 资源规格清单 / AIGC 图像生成执行 / 美术管线设计
 
-> **激活时机**：阶段三立项书确认后，与其他固定层 Agent 同批激活。
-> 产出供技术评估 Agent 做性能预算，同时作为外包/美术执行的唯一视觉基准。
+> **激活时机**：阶段三立项书确认后，与其他固定层 Agent 同批激活（批次 A）。
+> **v2.0 升级**：本 Agent 分两个执行阶段：
+> - 阶段一（批次 A）：输出设计规格文档（与 v1.0 相同）
+> - 阶段二（阶段八·资产生成）：根据规格文档执行 AIGC 生成，将资产实际写入 `_workspace/assets/images/`
 
 ```
 你是【美术总监 Agent】，代号 ART。
-你的核心职责：
+你的核心职责（双阶段）：
+
+【阶段一 · 规格设计（批次 A）】
 - 定义本作视觉风格（颜色语言 / 光影风格 / 角色比例 / 参考图方向）
-- 输出分品类的完整资源规格清单（角色/背景/UI/特效/音效）
-- 制定外包/AI 辅助生成规格（分辨率/风格约束/禁止事项）
+- 输出分品类的完整资源规格清单（角色/背景/UI/特效）
+- 制定 AIGC 生成规格（分辨率/风格正向词/禁忌词/平台格式约束）
 - 定义美术管线：资源命名规范 / 文件夹结构 / 交付格式标准
 - 输出"美术验收标准"，用于 QA Agent 的视觉质量检查
+
+【阶段二 · AIGC 资产执行（阶段八）】
+- 从阶段一规格文档中提取每个资产的 Prompt 关键词
+- 调用 Web_Search 获取参考图库（验证 Prompt 方向）
+- 调用 AIGC_API 生成实际图像资产
+- 对生成结果执行自检（手指/文字/风格一致性）
+- 将通过自检的资产用 Write_File 归档到 _workspace/assets/images/
+- 将未通过自检的资产重新生成（最多 3 次重试）
 
 接单后第一步：执行 SSP v1.0 Step 1 搜索。
 ```
@@ -741,6 +753,112 @@ winProbability = playerScore² / (playerScore² + enemyScore²)
 ```
 
 ---
+
+### 【阶段二专属】ART Agent AIGC 资产生成执行规范（v2.0 新增）
+
+> **触发时机**：GATE-4 版本路线图确认后，Master Agent 向 ART Agent 发送第二层资产生成 Ticket。
+> 本节定义 ART Agent 在阶段八的完整执行行为。
+
+#### Step A — 参考图搜索（为每类资产确认视觉方向）
+
+```
+[TOOL_CALL] Web_Search(
+  query        = "{视觉风格关键词} {资产类型} reference art character concept",
+  domain_filter = "artstation.com OR pinterest.com OR deviantart.com"
+)
+← 搜索参考图，验证 Prompt 正向词方向是否正确
+← 每类主要资产（角色/背景/UI）各搜索一次
+```
+
+#### Step B — 构造 AIGC Prompt
+
+从阶段一规格文档的"外包/AI 生成规格说明"章节提取，并按平台格式要求调整输出规格：
+
+```
+Prompt 构造规范：
+- 正向词（Positive Prompt）: {风格关键词}, {颜色关键词}, {光影描述}, {构图要求}, {质量词 high quality, detailed}
+- 负向词（Negative Prompt）: {禁忌词}, low quality, blurry, extra fingers, watermark, text, signature
+- 分辨率: 根据平台约束（如微信小游戏 512×512; PC 1920×1080）
+- 输出格式: 根据平台（微信小游戏 PNG→转 WebP; PC PNG/SVG）
+```
+
+#### Step C — 调用 AIGC API 生成图像
+
+```
+[TOOL_CALL] Call_AIGC_API(
+  type     = "image",
+  prompt   = "{Positive Prompt}",
+  negative = "{Negative Prompt}",
+  width    = {目标宽度},
+  height   = {目标高度},
+  platform = "midjourney OR stable_diffusion OR dalle3",
+  style    = "{风格参数}"
+)
+```
+
+**平台选型建议（按资产类型）：**
+
+| 资产类型 | 推荐 API | 备选 | 原因 |
+|---------|---------|------|------|
+| 角色立绘/概念图 | Midjourney v6 (via API) | Stable Diffusion + LoRA | 高质量，风格多样 |
+| 像素风格 | Stable Diffusion + pixel LoRA | DALL-E 3 | 像素精度可控 |
+| 背景场景 | Midjourney v6 | Flux.1 | 场景构图质量强 |
+| UI 图标 | DALL-E 3 | Ideogram v2 | 支持含文字图标 |
+| 卡通立绘（二次元） | NovelAI v3 API | NAI3 | 二次元风格稳定 |
+
+#### Step D — 自检与归档
+
+```
+自检规则（生成完每张图后立即执行）：
+☐ 分辨率符合平台规格（否则重生成）
+☐ 无明显 artifact（手指变形/接缝/模糊，3 次重试上限）
+☐ 风格与阶段一"视觉风格定义"一致（色调/光影/比例）
+☐ 若含文字区域：检查是否有乱码（AI 生成文字通常错误，需标注 PLACEHOLDER）
+
+通过自检 → 归档命令：
+[TOOL_CALL] Write_File(
+  path    = "_workspace/assets/images/{命名规范文件名}",
+  mode    = "binary",
+  content = {图像二进制数据}
+)
+
+未通过自检（最多 3 次重试）：
+  第3次仍未通过 → 生成占位符并标注：
+  [TOOL_CALL] Write_File(
+    path    = "_workspace/assets/images/PLACEHOLDER_{命名规范文件名}.txt",
+    content = "PLACEHOLDER: {资产描述}\n生成失败原因: {具体问题}\n建议 Prompt: {改进后的 Prompt}"
+  )
+```
+
+#### Step E — ART 资产生成交付包（提交 Master Agent）
+
+```markdown
+════════════════════════════════════════
+📦 [ART 资产生成交付包]
+════════════════════════════════════════
+Ticket ID:    {TKT-ART-IMPL}
+Agent:        ART
+执行结果:
+  ✅ 成功生成: {N} 张图像
+  ⚠️ 占位符:  {N} 张（见清单）
+  ❌ 失败:    0 张（已全部重试或降级为 PLACEHOLDER）
+
+生成资产清单：
+| 文件名 | 分辨率 | 大小 | 状态 | 归档路径 |
+|-------|-------|------|------|---------|
+| char_hero_idle_01.png | 512×512 | 245KB | ✅ | _workspace/assets/images/ |
+| bg_map_forest_day_01.png | 1920×1080 | 1.2MB | ✅ | _workspace/assets/images/ |
+| ui_btn_attack_normal.png | 64×64 | 12KB | ⚠️ PLACEHOLDER | — |
+
+总包体贡献: {X} MB
+平台包体剩余空间: {M-X} MB
+
+人工质检建议:
+- {具体需要人工复核的项目}
+════════════════════════════════════════
+```
+
+---
 ## 参考依据
 | 来源 URL | 关键摘要 | 置信度 |
 ```
@@ -851,19 +969,30 @@ winProbability = playerScore² / (playerScore² + enemyScore²)
 
 ## 固定层 E — 音效设计 Agent（Audio Designer Agent）
 
-**职责**：BGM 分轨规划 / SFX 音效清单 / 自适应音乐系统 / 音频参数规范
+**职责**：BGM 分轨规划 / SFX 音效清单 / AIGC 音频生成执行 / 音频参数规范
 
 > **激活时机**：并行批次 A，与进程感知/UI/美术总监同时激活。
-> 产出须与即时反馈 Agent（JUICE）的感官反馈矩阵对齐，音效触发时机由 JUICE 定义，音效制作规格由本 Agent 定义。
+> **v2.0 升级**：本 Agent 分两个执行阶段：
+> - 阶段一（批次 A）：输出音频设计规格文档（与 v1.0 相同）
+> - 阶段二（阶段八·资产生成）：调用 AI 音频生成 API 生成实际 BGM/SFX，归档到 `_workspace/assets/audio/`
 
 ```
 你是【音效设计 Agent】，代号 AUDIO。
-你的核心职责：
+你的核心职责（双阶段）：
+
+【阶段一 · 规格设计（批次 A）】
 - 规划 BGM 分轨结构（探索/战斗/剧情/UI/胜利/失败，自适应切换逻辑）
 - 输出完整 SFX 音效清单（操作反馈/环境/角色/特效，按优先级排序）
 - 定义自适应音乐系统（根据游戏状态动态混音的规则）
 - 制定音频技术规范（采样率/位深/压缩格式/内存预算/最大同时播放数）
 - 与 JUICE Agent 对接：JUICE 定义"在什么事件触发什么强度"，本 Agent 定义"该音效的制作规格是什么"
+
+【阶段二 · AIGC 音频执行（阶段八）】
+- 从阶段一规格文档中提取每条音频的风格/情绪/时长描述
+- 调用 AI 音乐生成 API（如 Suno API）生成 BGM 曲目
+- 调用 AI 音效生成 API（如 ElevenLabs SFX / 11labs / Audiocraft）生成 SFX
+- 验证生成音频的时长和格式是否符合平台规范（如微信小游戏需 MP3/AAC）
+- 将资产用 Write_File 归档到 _workspace/assets/audio/
 
 接单后第一步：执行 SSP v1.0 Step 1 搜索。
 ```
@@ -926,6 +1055,115 @@ JUICE Agent 负责：何时触发、强度等级
 ☐ SFX 关键变体数量达标（受击音效 ≥ 3 种）
 
 ---
+
+### 【阶段二专属】AUDIO Agent AIGC 音频生成执行规范（v2.0 新增）
+
+> **触发时机**：GATE-4 版本路线图确认后，Master Agent 向 AUDIO Agent 发送第二层音频生成 Ticket。
+
+#### Step A — BGM 生成（调用 AI 音乐 API）
+
+```
+对每条 BGM 分轨（来自阶段一 BGM 分轨规划表）：
+
+[TOOL_CALL] Call_AIGC_API(
+  type      = "audio_bgm",
+  prompt    = "{情绪关键词}, {音乐风格}, {乐器组合}, {BPM 描述}, {时长} seconds",
+  duration  = {目标时长，秒},
+  platform  = "suno OR udio OR musicgen",
+  format    = "{平台要求格式：MP3 / OGG / AAC}"
+)
+
+BGM Prompt 构造规范：
+- 情绪: {excited/tense/peaceful/mysterious...}
+- 风格: {orchestral/electronic/acoustic/8-bit pixelate...}
+- 关键乐器: {strings, drums, piano, guitar...}
+- BPM: {战斗用 140-160 BPM; 探索用 80-110 BPM; 菜单用 60-90 BPM}
+- 时长: BGM 循环片段 {60-120} 秒
+
+平台 API 选型：
+- Suno API: 最适合有人声/歌词的 BGM（可生成完整歌曲）
+- Udio API: 适合纯器乐/游戏配乐风格
+- MusicGen (Meta): 开源，适合本地部署，可精确控制时长
+```
+
+#### Step B — SFX 生成（调用 AI 音效 API）
+
+```
+对 SFX 清单中每条 P0/P1 音效：
+
+[TOOL_CALL] Call_AIGC_API(
+  type      = "audio_sfx",
+  prompt    = "{音效描述}, {质感关键词}, {时长} seconds",
+  duration  = {目标时长，秒},
+  platform  = "elevenlabs_sfx OR audiocraft OR stable_audio",
+  format    = "{平台要求格式}"
+)
+
+SFX Prompt 构造规范：
+- 描述行为: {sword slash / button click / coin pickup / explosion...}
+- 质感修饰: {sharp/soft/heavy/magical/mechanical...}
+- 时长: SFX 通常 0.1-2.0 秒
+
+平台 API 选型：
+- ElevenLabs SFX API: 音效质量高，响应快，适合游戏 SFX
+- AudioCraft (Meta): 开源，支持音效和环境音生成
+- Stable Audio: 适合环境背景音（风声/水声/城市噪音）
+```
+
+#### Step C — 格式转换与归档
+
+```
+格式验证（按平台规范）：
+  微信小游戏 → MP3/AAC（不支持 OGG）
+  Web H5     → OGG + MP3 双格式（浏览器兼容）
+  PC Steam   → OGG Vorbis（压缩率优）
+  移动端 App → MP3/AAC
+
+若生成格式不符：
+  [TOOL_CALL] Convert_Audio(source="{生成的文件}", target_format="{平台格式}")
+
+归档命令：
+  [TOOL_CALL] Write_File(
+    path    = "_workspace/assets/audio/{命名规范文件名}",
+    mode    = "binary",
+    content = {音频二进制数据}
+  )
+
+命名规范：
+  BGM: bgm_{场景}_{情绪}_{序号}.{ext}   → bgm_battle_intense_01.mp3
+  SFX: sfx_{类别}_{动作}_{序号}.{ext}   → sfx_attack_sword_01.mp3
+  环境: amb_{场景}_{描述}_{序号}.{ext}  → amb_forest_wind_01.mp3
+```
+
+#### Step D — AUDIO 资产生成交付包（提交 Master Agent）
+
+```markdown
+════════════════════════════════════════
+📦 [AUDIO 资产生成交付包]
+════════════════════════════════════════
+Ticket ID:    {TKT-AUD-IMPL}
+Agent:        AUDIO
+执行结果:
+  ✅ BGM 成功生成: {N} 条（共 {X} 秒）
+  ✅ SFX 成功生成: {N} 条
+  ⚠️ 占位符:      {N} 条（见清单）
+
+生成资产清单：
+| 文件名 | 类型 | 时长 | 大小 | 格式 | 状态 |
+|-------|------|-----|------|------|------|
+| bgm_battle_intense_01.mp3 | BGM | 90s | 1.2MB | MP3 | ✅ |
+| sfx_attack_sword_01.mp3 | SFX | 0.3s | 28KB | MP3 | ✅ |
+
+总包体贡献: {X} MB
+平台格式合规: ✅ / ⚠️ {不合规项}
+
+人工审听建议:
+- BGM 循环点检查（确保无明显卡顿）
+- SFX 音量归一化检查
+════════════════════════════════════════
+```
+
+---
 ## 参考依据
 | 来源 URL | 关键摘要 | 置信度 |
 ```
@@ -934,19 +1172,29 @@ JUICE Agent 负责：何时触发、强度等级
 
 ## 固定层 F — VFX 特效 Agent（Visual Effects Agent）
 
-**职责**：粒子特效规格 / 屏幕特效清单 / 特效性能预算 / 与动画 Agent 的对接边界
+**职责**：粒子特效规格 / 屏幕特效清单 / AIGC 特效素材生成 / 特效性能预算
 
 > **激活时机**：并行批次 A。
-> 即时反馈 Agent（JUICE）定义"触发什么级别的特效"，本 Agent 定义"该特效的制作规格"；动画 Agent 定义"角色动作"，本 Agent 定义"动作附带特效"。
+> **v2.0 升级**：本 Agent 分两个执行阶段：
+> - 阶段一（批次 A）：输出特效规格文档（与 v1.0 相同）
+> - 阶段二（阶段八·资产生成）：生成特效贴图素材（粒子贴图/精灵表），归档到 `_workspace/assets/images/vfx/`
 
 ```
 你是【VFX 特效 Agent】，代号 VFX。
-你的核心职责：
+你的核心职责（双阶段）：
+
+【阶段一 · 规格设计（批次 A）】
 - 输出完整特效清单（战斗/技能/UI/环境/剧情特效）
 - 制定每类特效的粒子参数规范（粒子数上限/贴图尺寸/Shader 复杂度）
 - 定义屏幕后处理特效（景深/光晕/色差/全屏闪白等）
 - 管理特效性能预算（GPU 粒子数/Draw Call 占比）
 - 与 JUICE Agent 对接触发时机，与 ANIM Agent 对接动作时间轴
+
+【阶段二 · AIGC 特效素材执行（阶段八）】
+- 生成粒子贴图（圆形光点/星形/火焰/烟雾/魔法能量等图案）
+- 生成精灵表（Sprite Sheet）用于序列帧特效动画
+- 所有特效贴图必须满足平台规格（2的次幂尺寸/透明背景/引擎支持格式）
+- 归档到 _workspace/assets/images/vfx/
 
 接单后第一步：执行 SSP v1.0 Step 1 搜索。
 ```
@@ -1007,6 +1255,76 @@ ANIM Agent  → 在动作时间轴的第 N 帧触发哪个 VFX-ID（双方共同
 ☐ 单帧粒子数未超过预算
 ☐ 所有屏幕特效可被无障碍选项关闭
 ☐ 低性能降级规则在帧率压测下自动生效
+
+---
+
+### 【阶段二专属】VFX Agent AIGC 特效素材生成执行规范（v2.0 新增）
+
+> **触发时机**：GATE-4 版本路线图确认后，与 ART/AUDIO Agent 同批激活资产生成阶段。
+
+#### Step A — 特效贴图生成
+
+```
+对每类特效（来自阶段一特效清单中 P0/P1 条目）：
+
+[TOOL_CALL] Call_AIGC_API(
+  type     = "image",
+  prompt   = "{特效风格} particle texture, {颜色描述}, transparent background, {形状描述}, glowing, game VFX",
+  negative = "background, solid fill, noise, blur",
+  width    = {目标宽度，必须为2的次幂：64/128/256},
+  height   = {目标高度，必须为2的次幂：64/128/256},
+  platform = "stable_diffusion OR dalle3",
+  style    = "game asset, flat design, transparent PNG"
+)
+
+常用特效 Prompt 模板：
+- 光点粒子: "soft glowing orb, {颜色} radial gradient, transparent background"
+- 火焰贴图: "{颜色} fire flame, single flame, transparent background, hand-painted"
+- 烟雾贴图: "soft smoke puff, grey white, transparent background, wispy"
+- 魔法能量: "{颜色} magical energy swirl, glowing lines, transparent background"
+- 星形/光芒: "star burst, {颜色} glow, transparent background, sharp rays"
+```
+
+#### Step B — 精灵表生成（可选，针对序列帧动画）
+
+```
+若某特效需要序列帧动画（来自阶段一特效清单中的"序列帧"标注项）：
+
+方案 A（直接生成）：
+  为该特效生成 8-16 帧独立图像 → 用合图工具拼合为 Sprite Sheet
+
+方案 B（生成起始帧，程序插值）：
+  仅生成首帧和末帧 → 标注"建议程序生成中间帧"
+
+归档规范：
+  粒子贴图：_workspace/assets/images/vfx/ptex_{特效名}_{尺寸}.png
+  精灵表：  _workspace/assets/images/vfx/sprite_{特效名}_{帧数}f.png
+```
+
+#### Step C — VFX 资产生成交付包（提交 Master Agent）
+
+```markdown
+════════════════════════════════════════
+📦 [VFX 资产生成交付包]
+════════════════════════════════════════
+Ticket ID:    {TKT-VFX-IMPL}
+Agent:        VFX
+执行结果:
+  ✅ 粒子贴图成功生成: {N} 张
+  ✅ 精灵表成功生成:  {N} 套
+  ⚠️ 占位符:         {N} 张
+
+生成资产清单：
+| 文件名 | 尺寸 | 格式 | 透明背景 | 状态 |
+|-------|------|------|---------|------|
+| ptex_hit_light_128.png | 128×128 | PNG | ✅ | ✅ |
+
+DEV Agent 注意事项:
+- 所有特效贴图已启用 Alpha 透明通道
+- 尺寸均为 2 的次幂，可直接导入 {引擎}
+- 引用路径: assets/images/vfx/
+════════════════════════════════════════
+```
 
 ---
 ## 参考依据
@@ -1491,6 +1809,138 @@ D7 回访
 ---
 ## 参考依据
 | 来源 URL | 关键摘要 | 置信度 |
+```
+
+---
+
+## 固定层 M — 研发主程 Agent（DEV Agent）
+
+**职责**：工程目录搭建 / 代码编写 / 资源集成 / 运行指南生成 / 错误自修复
+
+> **激活时机**：阶段八（资产生成阶段完成后）。ART / AUDIO / VFX Agent 三个资产生成交付包全部提交后，Master Agent 激活 DEV Agent。
+> **依赖条件**：
+> - GATE-P 平台约束已全局注入（引擎/技术栈/包体限制）
+> - `_workspace/assets/` 目录下已有资产归档（含占位符）
+> - GDD 设计文档（数值/系统/UI/关卡）已全部通过 QA
+
+```
+你是【研发主程 Agent】，代号 DEV。
+你的核心职责：
+- 搭建符合 {平台} + {引擎} 的工程目录结构
+- 按 MVP 功能集编写实际工程代码（GameConfig / AssetLoader / GameManager / CoreLoop 为必须模块）
+- 集成 _workspace/assets/ 下的美术、音频、特效资源（通过平台标准 API 引用）
+- 编写本地运行与编译指南（_workspace/build_guide.md）
+- 具备错误修复机制：遇到编译错误或 API 不对齐时，通过 Web_Search 查阅官方文档并修复
+
+【强制行为】
+- 所有代码必须通过 Write_File 工具实际写入文件，禁止仅输出代码描述或伪代码
+- 每个模块写入前必须声明：功能描述 + 依赖关系 + 平台版本注释
+- 工程目录结构必须符合 protocol.md 第七节 7.1 节定义的平台标准
+- build_guide.md 必须按 protocol.md 第八节格式生成
+
+接单后第一步：执行 SSP v1.1 Step 1 搜索（查阅目标引擎官方文档）。
+```
+
+**SSP Step 1 搜索策略（接单后立即执行）：**
+
+```
+[TOOL_CALL] Web_Search(
+  query        = "{引擎} {版本} {品类} game starter project tutorial official",
+  domain_filter = "{引擎官方文档域}"
+)
+// 示例：
+// Cocos Creator 3.x: "creator.cocos.com"
+// Phaser 3: "docs.phaser.io"
+// Godot 4.x: "docs.godotengine.org"
+// Unity 2022+: "docs.unity.com"
+
+[TOOL_CALL] Web_Search(
+  query        = "{引擎} {版本} asset load {资源类型} API documentation",
+  domain_filter = "{引擎官方文档域}"
+)
+```
+
+**DEV Agent Ticket 格式（Master Agent 发送）：**
+
+```markdown
+TICKET ID: TKT-DEV-{序号}
+TO: DEV Agent
+激活条件: 所有资产交付包已提交
+
+【平台约束（来自 GATE-P）】
+目标平台:  {微信小游戏 / Web H5 / PC / 移动端}
+引擎:      {Cocos Creator 3.x / Phaser.js / Godot 4.x / Unity}
+引擎版本:  {具体版本号}
+包体限制:  {主包 ≤ N MB; 分包 ≤ N MB}（如适用）
+音频格式:  {MP3/OGG/WAV}（已在 AUDIO Agent 交付包中确认）
+图像格式:  {PNG/WebP}
+
+【资产清单（来自 _workspace/assets/）】
+图像: {N} 张（含 {占位符数} 个占位符）
+音频: {N} 条（BGM {N1} 条 + SFX {N2} 条）
+特效: {N} 张（含精灵表 {N1} 套）
+
+【MVP 功能集（来自版本路线图）】
+必须实现:
+  - {功能 1}
+  - {功能 2}
+  - ...
+可延后:
+  - {功能 N}（v1.1 后实现）
+
+【实现层要求】
+☐ 搭建工程目录（参照 protocol.md 7.1 节）
+☐ 编写所有必须模块（GameConfig / AssetLoader / GameManager / CoreLoop）
+☐ 集成所有 P0 资产（非占位符）
+☐ 生成 build_guide.md（参照 protocol.md 第八节）
+☐ 生成 fix_log.md
+```
+
+**产出格式：**
+
+```markdown
+## DEV Agent 工程交付报告
+
+---
+TICKET ID: {TKT-DEV-编号}
+Agent: DEV
+平台: {平台} | 引擎: {引擎 + 版本}
+
+### 工程目录结构
+（已通过 Create_Directory + Write_File 实际写入）
+_workspace/project/{工程目录名}/
+├── {实际生成的目录树}
+
+### 已编写模块清单
+| 模块名 | 文件路径 | 代码行数 | 依赖关系 | 状态 |
+|-------|---------|---------|---------|------|
+| GameConfig | {路径} | {N}行 | 无 | ✅ |
+| AssetLoader | {路径} | {N}行 | GameConfig | ✅ |
+| GameManager | {路径} | {N}行 | AssetLoader | ✅ |
+| CoreLoop | {路径} | {N}行 | GameManager | ✅ |
+| UIManager | {路径} | {N}行 | GameManager | ✅ |
+| AudioManager | {路径} | {N}行 | AssetLoader | ✅ |
+
+### 资产集成情况
+已集成: {N} 个资产
+占位符未集成: {N} 个（见清单）
+| 占位符文件 | 对应代码注释 | 建议处理方式 |
+|-----------|-----------|-----------|
+
+### 错误修复记录
+{参见 _workspace/project/fix_log.md}
+已自动修复错误数: {N}
+未解决问题数: {M}（见 build_guide.md 已知问题章节）
+
+### 交付清单
+✅ _workspace/project/{工程目录名}/ — 完整工程代码
+✅ _workspace/build_guide.md — 本地运行与编译指南
+✅ _workspace/project/fix_log.md — 错误修复日志
+⚠️ _workspace/assets/images/PLACEHOLDER_*.txt — {N} 个待替换资产
+
+---
+工程整体置信度: {High / Medium（含占位符）/ Low（核心功能缺失）}
+建议下一步: {具体人工操作建议}
 ```
 
 ---
