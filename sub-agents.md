@@ -759,15 +759,37 @@ winProbability = playerScore² / (playerScore² + enemyScore²)
 > **触发时机**：GATE-4 版本路线图确认后，Master Agent 向 ART Agent 发送第二层资产生成 Ticket。
 > 本节定义 ART Agent 在阶段八的完整执行行为。
 
-#### Step A — 参考图搜索（为每类资产确认视觉方向）
+#### Step A — 参考图搜索 + 免费素材库检索（为每类资产确认视觉方向）
+
+> **v2.1 新增**：ART Agent 必须优先搜索免费可商用素材库（CC0/CC-BY），降低 AIGC 生成失败风险。
 
 ```
+【搜索策略 1：风格参考图（验证 Prompt 方向）】
 [TOOL_CALL] Web_Search(
   query        = "{视觉风格关键词} {资产类型} reference art character concept",
   domain_filter = "artstation.com OR pinterest.com OR deviantart.com"
 )
-← 搜索参考图，验证 Prompt 正向词方向是否正确
-← 每类主要资产（角色/背景/UI）各搜索一次
+
+【搜索策略 2：免费素材库检索（优先使用 CC0/CC-BY 素材）】
+[TOOL_CALL] Web_Search(
+  query        = "{资产描述} free game asset sprite CC0 OR CC-BY pixel art",
+  domain_filter = "opengameart.org OR kenney.nl OR itch.io"
+)
+← opengameart.org：免费 CC0/CC-BY 游戏资产库（sprite/background/effect）
+← kenney.nl：CC0 高质量 2D/3D 游戏资产，像素风/矢量风均有
+← itch.io/game-assets：独立开发者资产包，部分免费
+
+【搜索策略 3：动效/特效素材（补充动画和 VFX 素材）】
+[TOOL_CALL] Web_Search(
+  query        = "{动效类型} free CSS animation keyframes OR sprite sheet animation",
+  domain_filter = "animate.style OR cssanimation.rocks OR codepen.io"
+)
+← 用于 UI 动效、入场动画、按钮反馈等前端动效素材
+
+搜索结果处理：
+- 若找到合适的免费素材 → 直接在 Write_File 中引用外部 URL + 生成下载清单
+- 若未找到合适素材 → 进入 Step B 使用 AIGC 生成
+- 素材质量判断标准：分辨率符合规格 + 风格与目标视觉一致 + 授权可商用
 ```
 
 #### Step B — 构造 AIGC Prompt
@@ -782,29 +804,81 @@ Prompt 构造规范：
 - 输出格式: 根据平台（微信小游戏 PNG→转 WebP; PC PNG/SVG）
 ```
 
-#### Step C — 调用 AIGC API 生成图像
+#### Step C — 调用 AIGC API 生成图像（v2.1 多工具接口 + 降级策略）
 
+> **v2.1 新增**：按以下优先级依次尝试已配置的公开图像生成 API。每次生成失败最多重试 3 次。
+
+**优先级 1：Stability AI（Stable Diffusion API）**
 ```
-[TOOL_CALL] Call_AIGC_API(
-  type     = "image",
-  prompt   = "{Positive Prompt}",
-  negative = "{Negative Prompt}",
-  width    = {目标宽度},
-  height   = {目标高度},
-  platform = "midjourney OR stable_diffusion OR dalle3",
-  style    = "{风格参数}"
+若已配置 Stable Diffusion API Key（stability.ai）：
+POST https://api.stability.ai/v1/generation/{engine}/text-to-image
+  {
+    "text_prompts": [
+      {"text": "{Positive Prompt}", "weight": 1},
+      {"text": "{Negative Prompt}", "weight": -1}
+    ],
+    "width":  {目标宽度（64的倍数）},
+    "height": {目标高度（64的倍数）},
+    "steps":  30,
+    "cfg_scale": 7
+  }
+← 响应包含 base64 image → 解码后用 Write_File 写入资产目录
+```
+
+**优先级 2：Flux API（via Replicate）**
+```
+若已配置 Replicate API Token：
+POST https://api.replicate.com/v1/predictions
+  {
+    "version": "black-forest-labs/flux-1.1-pro",
+    "input": {
+      "prompt":  "{Positive Prompt}",
+      "width":   {目标宽度},
+      "height":  {目标高度},
+      "output_format": "png"
+    }
+  }
+← 轮询 get 结果 URL → 下载图像 → Write_File 归档
+```
+
+**优先级 3：DALL-E 3（via OpenAI API）**
+```
+若已配置 OpenAI API Key：
+POST https://api.openai.com/v1/images/generations
+  {
+    "model": "dall-e-3",
+    "prompt": "{Positive Prompt + 风格约束}",
+    "n": 1,
+    "size": "{1024x1024 / 1792x1024 / 1024x1792}",
+    "quality": "standard",
+    "response_format": "b64_json"
+  }
+← 解码 base64 → Write_File 归档
+```
+
+**优先级 4：SVG 程序化生成（零依赖降级方案，任何 API 均不可用时）**
+```
+生成高质量 SVG 占位符，而非空白文件：
+[TOOL_CALL] Write_File(
+  path    = "_workspace/assets/images/{命名规范文件名}.svg",
+  content = "<svg>...</svg>"   ← 使用正确的游戏视觉 Token 绘制有意义的形状/色块
 )
+SVG 降级规范：
+  - UI 图标：使用 SVG path + filter(drop-shadow) 绘制，颜色来自阶段一主色板
+  - 角色/背景：带标注文本 + 视觉色块的分层 SVG，标注资产规格和描述
+  - 特效：内嵌 CSS @keyframes 的 SVG animation 动效，直接在游戏中可用
+  - 所有 SVG 须包含 viewBox 属性以支持任意缩放
 ```
 
 **平台选型建议（按资产类型）：**
 
-| 资产类型 | 推荐 API | 备选 | 原因 |
-|---------|---------|------|------|
-| 角色立绘/概念图 | Midjourney v6 (via API) | Stable Diffusion + LoRA | 高质量，风格多样 |
-| 像素风格 | Stable Diffusion + pixel LoRA | DALL-E 3 | 像素精度可控 |
-| 背景场景 | Midjourney v6 | Flux.1 | 场景构图质量强 |
-| UI 图标 | DALL-E 3 | Ideogram v2 | 支持含文字图标 |
-| 卡通立绘（二次元） | NovelAI v3 API | NAI3 | 二次元风格稳定 |
+| 资产类型 | 首选工具 | 备选工具 | 降级方案 |
+|---------|---------|---------|---------|
+| 角色立绘/概念图 | Stable Diffusion API | Flux (Replicate) | SVG 分层占位 |
+| 像素风格 | Stable Diffusion + pixel style | DALL-E 3 | SVG pixel grid |
+| 背景场景 | Flux 1.1 Pro | Stable Diffusion | SVG gradient 场景 |
+| UI 图标 | DALL-E 3 | Stable Diffusion | 纯 SVG 图标（可直接用于游戏）|
+| 卡通立绘 | Stable Diffusion + anime LoRA | Flux | SVG 角色轮廓 |
 
 #### Step D — 自检与归档
 
@@ -1838,6 +1912,25 @@ D7 回访
 - 工程目录结构必须符合 protocol.md 第七节 7.1 节定义的平台标准
 - build_guide.md 必须按 protocol.md 第八节格式生成
 
+【视觉质量强制约束 · v2.1 新增 · 参照 ui-ux-pro-max 设计体系】
+绝对禁止输出以下低质量代码：
+✘ 禁止使用 Emoji 作为游戏图标或 UI 元素（改用 SVG icon 或 Canvas 绘制）
+✘ 禁止使用纯色矩形作为角色/特效（改用渐变、光晕、阴影层次）
+✘ 禁止使用系统默认字体（改用 Google Fonts 或自定义 @font-face）
+✘ 禁止无动画过渡（所有 UI 状态切换必须有缓动动效）
+✘ 禁止纯白/纯黑背景（改用深度色调 + 光线层叠营造氛围）
+
+强制执行以下视觉设计规范：
+✔ Design Token 先行：在代码顶部声明 CSS 变量 / JS 常量色板（主色/辅色/强调色/背景色/文字色）
+✔ 深色主题：游戏界面采用 #0A0F1E 等深色背景 + 高对比度前景元素，拒绝刺眼白色
+✔ 层次阴影：使用多层 box-shadow / drop-shadow 表达深度（near/mid/far 三层）
+✔ 渐变语言：按钮/面板使用线性或径向渐变而非纯色，体现光照质感
+✔ 动效系统：定义动效节奏变量（fast:150ms, normal:300ms, slow:500ms + easeOutCubic），全局统一
+✔ 交互反馈：每个可点击元素有 :hover 缩放/发光 + :active 按压 + 触发音效触发点
+✔ 微粒/光效：关键事件（得分/升级/波次完成）触发粒子爆发，使用 Canvas API 或 CSS animation
+✔ 排版系统：标题/副标题/正文/数字使用不同字号比例（1.618 黄金比例或 1.25 模块化比例）
+✔ 空间留白：UI 元素间距遵循 8px Grid（8/16/24/32/48px），避免视觉拥挤
+
 接单后第一步：执行 SSP v1.1 Step 1 搜索（查阅目标引擎官方文档）。
 ```
 
@@ -1894,6 +1987,30 @@ TO: DEV Agent
 ☐ 集成所有 P0 资产（非占位符）
 ☐ 生成 build_guide.md（参照 protocol.md 第八节）
 ☐ 生成 fix_log.md
+
+【视觉质量验收清单 · v2.1 新增 · DEV Agent 自检用，交付前必须全部勾选】
+设计 Token 层：
+  ☐ 顶部已声明 Design Token 色板（主色/辅色/强调/背景/文字至少 5 个）
+  ☐ 所有颜色引用均来自 Token，无硬编码色值散落在业务代码中
+  ☐ 动效时长常量已定义（fast/normal/slow + easing 函数）
+  ☐ 字体已引入（非系统默认），标题/正文/数字使用不同字重/字号
+
+视觉呈现层：
+  ☐ 背景：深色基调（亮度 < 20%），无纯白/纯黑
+  ☐ 元素：渐变或多层阴影而非纯色块，最小深度感= 2 层阴影
+  ☐ 图标/Icon：SVG 内联或 Canvas 绘制，无 Emoji 替代
+  ☐ 特效：关键事件（得分/失败/升级）有粒子或发光动效
+
+交互层：
+  ☐ 所有按钮有 hover + active 两种视觉反馈状态
+  ☐ 面板弹出/关闭有缓动入场动画（入场 ≥ 200ms，退出 ≥ 150ms）
+  ☐ 血条/数值变化有渐变过渡（≥ 100ms）而非瞬间跳变
+  ☐ 波次提示/BOSS 提示有屏幕级全屏动效
+
+排版层：
+  ☐ 字号层级至少 3 级（大标题 ≥ 24px / 副标题 ≥ 16px / 正文 ≥ 12px）
+  ☐ 行间距 ≥ 1.4，汉字段落不拥挤
+  ☐ 关键数字（金币/血量/得分）使用等宽字体或数字专用字重
 ```
 
 **产出格式：**
